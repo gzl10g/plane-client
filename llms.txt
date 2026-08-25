@@ -1,0 +1,404 @@
+# planec — Plane API CLI & TypeScript Library
+
+Typed HTTP client for [Plane API](https://plane.so). Zero runtime dependencies, ESM-only.
+
+Package: `@gzl10/plane-client`
+Install (library): `npm install @gzl10/plane-client`
+Install (CLI): `npm install -g @gzl10/plane-client`
+
+## TypeScript Library Usage
+
+```typescript
+import { PlaneClient, PlaneApiError } from '@gzl10/plane-client'
+
+const client = new PlaneClient({
+  baseUrl: 'https://plane.example.com',
+  apiKey: 'pk_...',
+  workspace: 'my-workspace',
+})
+
+// list() returns Page<WorkItem> with { items, hasNext, nextCursor?, total? }
+const page = await client.workItems.list('project-uuid')
+for (const item of page.items) console.log(item.name)
+
+// get() returns WorkItem | null (null on 404, no error)
+const workItem = await client.workItems.get('PROJ-42')
+
+// listAll() yields AsyncIterable<WorkItem>, auto-pages through all results
+for await (const item of client.workItems.listAll('project-uuid')) {
+  console.log(item.name)
+}
+```
+
+All resource classes follow the same pattern: `list()` → `Page<T>` (or `T[]` for non-paginated), `get()` → `T | null`, `create()` → `T`, `update()` → `T`.
+
+## Setup
+
+```bash
+planec config set baseUrl https://plane.example.com
+planec login --token YOUR_API_KEY
+planec workspace use YOUR_WORKSPACE_SLUG   # optional — or use --workspace / PLANE_WORKSPACE
+planec use PROJECT_UUID                    # optional — or use -p / PLANE_PROJECT
+```
+
+Config saved to `~/.planec/config.json`. View with `planec config show`.
+
+## Context resolution
+
+Workspace slug resolved in priority order:
+1. `--workspace <slug>` global flag (before subcommand)
+2. `PLANE_WORKSPACE=<slug>` environment variable
+3. Active workspace saved via `planec workspace use <slug>`
+
+Project UUID resolved in priority order:
+1. `--project <uuid>` / `-p <uuid>` flag on any command
+2. `PLANE_PROJECT=<uuid>` environment variable
+3. Active project saved via `planec use <uuid>`
+
+Minimum required config: `baseUrl` + `apiKey` (login). Workspace and project can be passed inline:
+
+```bash
+planec --workspace my-slug --json work-items list -p <project-uuid>
+PLANE_WORKSPACE=my-slug PLANE_PROJECT=<uuid> planec work-items list --json
+```
+
+## JSON output
+
+All read commands accept `--json` for machine-readable output:
+
+```bash
+planec --json work-items list | jq '.items[].sequence_id'
+planec work-items search "auth" --json | jq '.[] | {id, name, state}'
+```
+
+`--json` output is flushed before exit, so piping large payloads to `jq` never
+truncates. When a list returns zero results, the resolved `workspace=…, project=…`
+context is printed to **stderr** (stdout stays clean) so an empty result caused by
+the wrong context is not silent. `401`/`403` errors add an actionable hint on stderr.
+
+## Commands
+
+### Config & Auth
+```
+planec config set baseUrl <url>      Set Plane base URL
+planec config set apiKey <key>       Set API key (use login instead)
+planec config show                   Show current config
+planec login --token <token>         Save API token
+planec use <projectUuid>             Set active project
+planec workspace use <slug>          Set active workspace
+```
+
+### Projects
+```
+planec projects list [--per-page n] [--json]   # workspace-level; NO -p flag — this is where the project UUID comes from
+```
+Walks every page (the API defaults to 20 per page), so the listing is never silently truncated.
+Table columns: identifier / name / uuid. `--json` gives the full raw project objects.
+
+### Work Items
+```
+planec work-items list [-p uuid] [--order-by field] [--per-page n] [--expand fields] [--with-modules] [--json]   # --expand defaults to state,modules
+planec work-items get PROJ-42 [--with-modules] [--with-comments] [--json]                                        # requests expand=state,modules; always checks for comments (stderr hint), --with-comments attaches bodies
+planec work-items get-by-id <uuid|PROJ-42> [-p uuid] [--with-modules] [--with-comments] [--json]
+planec work-items search "query" [--workspace-search] [-p uuid] [--limit n] [--json]
+planec work-items create [-p uuid] --name "title" [--priority urgent|high|medium|low|none] [--state uuid] [--labels uuid1,uuid2] [--assignees uuid1] [--module uuid] [--description-html "<p>text</p>" | --description-html-file path.html] [--json]   # --module adds it to a module after creation
+planec work-items update <uuid|PROJ-42> [-p uuid] [--name ...] [--priority ...] [--state ...] [--description-html "<p>..." | --description-html-file path.html] [--json]
+planec work-items activities <uuid|PROJ-42> [-p uuid] [--json]
+```
+
+### Comments
+```
+planec work-items comments list <workItemId> [-p uuid] [--json]
+planec work-items comments create <workItemId> --comment-html "<p>text</p>" [-p uuid] [--json]
+planec work-items comments update <workItemId> <commentId> --comment-html "<p>text</p>" [-p uuid]
+planec work-items comments delete <workItemId> <commentId> [-p uuid]
+```
+
+### Links & Relations
+```
+planec work-items links create <workItemId> --url https://... [--title "title"] [-p uuid]
+planec work-items relations list <workItemId> [-p uuid] [--json]
+planec work-items relations create <workItemId> --type blocking --issues PROJ-43,PROJ-44 [-p uuid]   # refs: UUIDs or PROJ-N; comma- or space-separated
+```
+
+### Cycles (Sprints)
+```
+planec cycles list [-p uuid] [--json]
+planec cycles get <id> [-p uuid] [--json]
+planec cycles create [-p uuid] --name "Sprint 1" [--start-date 2026-01-01] [--end-date 2026-01-14] [--json]
+planec cycles update <id> [-p uuid] [--name ...] [--start-date ...] [--end-date ...] [--json]
+planec cycles archive <id> [-p uuid]
+planec cycles transfer <fromId> --to <toId> [-p uuid]
+planec cycles work-items <id> [-p uuid] [--json]
+planec cycles add-work-items <cycleId> --work-items PROJ-42,PROJ-43 [-p uuid]   # refs: UUIDs or PROJ-N
+planec cycles remove-work-item <cycleId> <workItemId|PROJ-42> [-p uuid]
+planec cycles delete <id> [-p uuid] [--yes]           # prompts unless --yes
+```
+
+### Modules
+```
+planec modules list [-p uuid] [--json]
+planec modules get <id> [-p uuid] [--json]
+planec modules create [-p uuid] --name "Module 1" [--start-date ...] [--target-date ...] [--json]
+planec modules update <id> [-p uuid] [--name ...] [--status ...] [--json]
+planec modules work-items <id> [-p uuid] [--json]
+planec modules add-work-items <moduleId> --work-items PROJ-42,PROJ-43 [-p uuid]   # refs: UUIDs or PROJ-N
+planec modules remove-work-item <moduleId> <workItemId|PROJ-42> [-p uuid]
+planec modules delete <id> [-p uuid] [--yes]          # prompts unless --yes
+```
+
+### States, Labels, Intake
+```
+planec states list [-p uuid] [--json]
+planec labels list [-p uuid] [--json]
+planec labels create [-p uuid] --name "bug" [--color "#ff0000"] [--json]
+planec intake list [-p uuid] [--json]
+planec intake create [-p uuid] --name "Bug report" [--priority medium] [--description-html "<p>..." | --description-html-file path.html] [--json]
+planec intake accept <id> [-p uuid]     # <id> = intake record id (as listed) or work item id
+planec intake decline <id> [-p uuid]
+```
+
+### Attachments
+
+```
+planec work-items attachments list <workItemId> [-p uuid] [--json]
+planec work-items attachments upload <workItemId> --file ./report.pdf [--type application/pdf] [--name report.pdf] [-p uuid] [--json]   # drives the full presigned-URL flow in one call
+planec work-items attachments download-url <workItemId> <attachmentId> [-p uuid] [--json]   # prints the presigned S3 URL (the detail GET redirects, it does not return JSON)
+planec work-items attachments delete <workItemId> <attachmentId> [-p uuid]
+```
+
+`workItemId` accepts a `PROJ-42` identifier, a work item UUID, or an intake
+issue's underlying `issue` UUID (from `intake list`) — attachments live on the
+same `Issue` record either way, there is no separate intake-attachments endpoint.
+
+## Identifiers vs UUIDs
+
+```
+PROJ-42   → human-readable sequence ID (use: work-items get PROJ-42)
+uuid      → internal UUID (use: work-items get-by-id <uuid> -p <project-uuid>)
+```
+
+The CLI accepts EITHER a `PROJ-42` identifier or a UUID for `work-items update`,
+`get-by-id`, `activities`, `comments`, `links`, `relations`, and
+`modules/cycles remove-work-item` — an identifier is resolved to its UUID
+automatically before hitting the UUID-only endpoint. The TypeScript library's
+`update`/`getById`/etc. still take a UUID directly.
+
+## Typical agent workflow
+
+```bash
+# 1. Discover work items
+planec --json work-items search "authentication" | jq '.[] | {id: .sequence_id, name}'
+
+# 2. Get by human-readable ID
+planec --json work-items get PROJ-42
+
+# 3. Create new work item
+planec --json work-items create -p $PROJECT --name "Fix login" --priority high
+
+# 4. Move to active cycle
+planec cycles list -p $PROJECT --json | jq '.[0].id' > /tmp/cycle_id
+planec cycles add-work-items $(cat /tmp/cycle_id) --work-items $WORK_ITEM_UUID -p $PROJECT
+```
+
+## API v1 Gotchas (CRITICAL)
+
+Work items list DOES NOT filter by state/priority/labels — these query params are silently ignored. Use:
+- `search` endpoint (textual, workspace-level)
+- `/cycles/{id}/work-items/` or `/modules/{id}/work-items/` (scoped)
+- `listAll()` + filter locally
+
+Pages API not available in v1 — no `planec pages` command.
+Views API not available in v1 — no `planec views` command.
+Rate limit is aggressive (~3s between bulk operations recommended).
+The auth header is case-sensitive on the wire: send exactly `X-API-Key`. A client that normalises it to `X-Api-Key` (e.g. Python's `urllib.request`) gets **403 on every workspace**, which reads as a permissions problem but is not.
+`/projects/` returns `next_cursor` even on the last page (`next_page_results: false`) — pagination must stop on `next_page_results`, not on the cursor being present.
+
+## TypeScript API Reference
+
+### PlaneClient
+
+```typescript
+class PlaneClient {
+  constructor(config: { baseUrl: string; apiKey: string; workspace: string; timeout?: number; retry?: { maxRetries?: number; retryOn?: number[] }; onRequest?: (req: { method: string; url: string }) => void; onResponse?: (res: { method: string; url: string; status: number; durationMs: number }) => void })
+  version(): Promise<string>
+  workItems: WorkItemsResource
+  projects: ProjectsResource
+  states: StatesResource
+  labels: LabelsResource
+  modules: ModulesResource
+  cycles: CyclesResource
+  intake: IntakeResource
+}
+```
+
+### Resources — Common CRUD Pattern
+
+Every resource follows the same method signatures:
+
+```typescript
+list(projectId: string, options?: ListOptions): Promise<Page<T>>      // Paginated results
+get(identifier: string): Promise<T | null>                             // Returns null on 404
+create(projectId: string, input: CreateInput): Promise<T>              // Creates and returns the resource
+update(projectId: string, id: string, input: UpdateInput): Promise<T>  // Updates and returns the resource
+listAll(projectId: string, options?: Omit<ListOptions, 'cursor'>): AsyncIterable<T>  // Yields all items
+```
+
+### Resource-specific methods
+
+```typescript
+// WorkItemsResource
+workItems.list(projectId, options?: { orderBy?: string; fields?: string[]; expand?: string[] }): Promise<Page<WorkItem>>
+workItems.get(identifier: 'PROJ-42'): Promise<WorkItem | null>
+workItems.getById(projectId, uuid): Promise<WorkItem | null>
+workItems.search({ query, limit?, workspaceSearch?, projectId? }): Promise<WorkItemSearchResult[]>
+workItems.listAll(projectId): AsyncIterable<WorkItem>
+workItems.comments.list(projectId, workItemId): Promise<Comment[]>
+workItems.comments.create(projectId, workItemId, commentHtml): Promise<Comment>
+workItems.comments.update(projectId, workItemId, commentId, { commentHtml }): Promise<Comment>
+workItems.comments.delete(projectId, workItemId, commentId): Promise<void>
+workItems.links.create(projectId, workItemId, { url, title? }): Promise<unknown>
+workItems.relations.list(projectId, workItemId): Promise<Record<RelationType, string[]>>
+workItems.relations.create(projectId, workItemId, { relationType, issues }): Promise<RelationItem[]>
+workItems.activities.list(projectId, workItemId, options?): Promise<Page<Activity>>
+
+// CyclesResource
+cycles.list(projectId): Promise<Page<Cycle>>
+cycles.get(id): Promise<Cycle | null>
+cycles.create(projectId, { name, description?, start_date?, end_date? }): Promise<Cycle>
+cycles.update(projectId, id, { name?, description?, start_date?, end_date? }): Promise<Cycle>
+cycles.delete(projectId, cycleId): Promise<void>
+cycles.archive(projectId, id): Promise<void>
+cycles.transfer(projectId, fromId, { to: toId }): Promise<Cycle>
+cycles.workItems(projectId, cycleId): Promise<Page<WorkItem>>
+cycles.workItemsAll(projectId, cycleId): AsyncIterable<WorkItem>
+cycles.addWorkItems(projectId, cycleId, { workItems: string[] }): Promise<void>
+cycles.removeWorkItem(projectId, cycleId, workItemId): Promise<void>
+
+// ModulesResource
+modules.list(projectId): Promise<Page<Module>>
+modules.get(id): Promise<Module | null>
+modules.create(projectId, { name, description?, start_date?, target_date? }): Promise<Module>
+modules.update(projectId, id, { name?, description?, status?, start_date?, target_date? }): Promise<Module>
+modules.delete(projectId, moduleId): Promise<void>
+modules.workItems(projectId, moduleId): Promise<Page<WorkItem>>
+modules.workItemsAll(projectId, moduleId): AsyncIterable<WorkItem>
+modules.addWorkItems(projectId, moduleId, { workItems: string[] }): Promise<void>
+modules.removeWorkItem(projectId, moduleId, workItemId): Promise<void>
+modules.membershipMap(projectId): Promise<Map<string, Module[]>>   // client-side workaround, see below
+attachModules(items, membership): T[]                              // merges membershipMap into work items (pure fn, exported from resources/modules)
+
+// ProjectsResource (workspace-level — no projectId argument)
+projects.list(options?: { perPage?, cursor?, signal? }): Promise<Page<Project>>   // perPage clamped to 100 (API max)
+projects.listAll(options?: { perPage?, signal? }): AsyncIterable<Project>
+
+// States, Labels, Intake (non-paginated)
+states.list(projectId): Promise<State[]>
+labels.list(projectId): Promise<Label[]>
+labels.create(projectId, { name, color? }): Promise<Label>
+intake.list(projectId): Promise<IntakeIssue[]>
+intake.create(projectId, { name, description_html?, priority? }): Promise<IntakeIssue>
+intake.accept(projectId, id): Promise<IntakeIssue>
+intake.decline(projectId, id): Promise<IntakeIssue>
+
+// AttachmentsResource (mounted as workItems.attachments — also covers intake work items, same underlying issue id)
+workItems.attachments.list(projectId, workItemId): Promise<Attachment[]>
+workItems.attachments.upload(projectId, workItemId, { name, type?, size, externalId?, externalSource? }, fileData: Uint8Array): Promise<Attachment>   // full 3-step flow: credentials -> S3 POST -> confirm
+workItems.attachments.getDownloadUrl(projectId, workItemId, attachmentId): Promise<string>   // resolves the presigned S3 URL; the detail GET is a redirect, not JSON
+workItems.attachments.delete(projectId, workItemId, attachmentId): Promise<void>
+```
+
+### Page<T>
+
+```typescript
+interface Page<T> {
+  items: T[]
+  total?: number
+  nextCursor?: string
+  hasNext: boolean
+}
+```
+
+### PlaneApiError
+
+```typescript
+class PlaneApiError extends Error {
+  status: number
+  statusText: string
+  code?: string
+  body?: unknown
+  isAuth: boolean       // true if status === 401
+  isPermission: boolean // true if status === 403
+  isNotFound: boolean   // true if status === 404
+  isRateLimit: boolean  // true if status === 429
+  isTimeout: boolean    // true if status === 408
+}
+```
+
+### Exported Types
+
+```typescript
+type Priority = "urgent" | "high" | "medium" | "low" | "none"
+type StateGroup = "backlog" | "unstarted" | "started" | "completed" | "cancelled"
+type RelationType = "blocking" | "blocked_by" | "duplicate" | "relates_to" | "start_before" | "start_after" | "finish_before" | "finish_after"
+type RelationsMap = Record<RelationType, string[]>
+
+interface WorkItem { id: string; name: string; sequence_id: number; state: string; priority: Priority; assignees: string[]; labels: string[]; parent?: string; created_at: string; updated_at: string; [key: string]: unknown }
+interface Comment { id: string; comment_html: string; created_at: string; updated_at: string; [key: string]: unknown }
+interface Activity { id: string; created_at: string; verb: string; field: string | null; old_value: string | null; new_value: string | null; comment: string | null; actor: string; [key: string]: unknown }
+interface Project { id: string; name: string; identifier: string; description?: string; network?: number; workspace?: string; project_lead?: string | null; [key: string]: unknown }
+interface State { id: string; name: string; group: StateGroup; color: string; [key: string]: unknown }
+interface Label { id: string; name: string; color?: string; [key: string]: unknown }
+interface Module { id: string; name: string; description?: string; status?: string; start_date?: string; target_date?: string; [key: string]: unknown }
+interface Cycle { id: string; name: string; description?: string; start_date?: string; end_date?: string; [key: string]: unknown }
+interface CreateWorkItemInput { name: string; description_html?: string; state?: string; priority?: Priority; assignees?: string[]; labels?: string[]; parent?: string; start_date?: string; target_date?: string; estimate_point?: string | null; type?: string; module?: string }
+interface UpdateWorkItemInput { name?: string; description_html?: string; state?: string; priority?: Priority; assignees?: string[]; labels?: string[]; start_date?: string; target_date?: string; estimate_point?: string | null; type?: string; module?: string }
+interface UpdateCommentInput { commentHtml: string }
+interface CreateLinkInput { url: string; title?: string }
+interface CreateRelationInput { relationType: RelationType; issues: string[] }
+interface RelationItem { id: string; name: string; sequence_id: number; [key: string]: unknown }
+```
+
+## What This Does NOT Do
+
+- **No OAuth** — Only API key authentication (`X-API-Key` header)
+- **No Pages API** — Plane v1 does not expose pages via API key auth. `PagesResource` exists in source but is not mounted on `PlaneClient`.
+- **No Views API** — Plane v1 does not expose views via API key auth.
+- **No Sub-issues** — The `parent` field on WorkItem works (read/write), but `/work-items/{id}/sub-issues/` is not mounted in v1.
+- **No external OAuth providers** — Google, GitHub, etc. login flows are not supported.
+- **No webhooks** — Webhook creation/management is not exposed.
+- **`expand=modules` returns nothing** — A work item's module membership is not expanded by the v1 API (verified against Plane 1.4.1), so an empty `modules` field does NOT mean the item has no module. Check from the module side: `planec modules work-items <moduleId> -p <project>`, or pass `--with-modules` to `work-items list|get|get-by-id` (client-side workaround: walks every module in the project and cross-references — costs 1 extra request per module, so it's opt-in, not the default).
+- **`work-items get`/`get-by-id` never include comments** — Comments are a separate resource (`GET .../comments/`); the item response has no count or preview of them. `get`/`get-by-id` now (≥0.12.0) always fetch the comment list as a side effect and print an stderr hint (`N comment(s) on <id> — ...`) if any exist — one extra request, cheap enough to be unconditional (unlike `--with-modules`). Pass `--with-comments` to attach the comment bodies to the JSON output instead of just the hint.
+- **Plane rewrites description HTML on save** — The editor re-serialises what you send (injected `class`/`spellcheck` on `<code>`, adjacent tags reordered), so a `get` → string-replace → `update` round trip will not match on markup. Match on plain text, or append instead of editing in place.
+- **A large description must go through `--description-html-file`** — Passing ~100 KB of HTML inline dies with `E2BIG` at the argv limit, before Plane ever sees it.
+- **The attachment detail GET is a redirect, not a JSON endpoint** — `GET .../attachments/{id}/` 302-redirects to a presigned S3 URL (verified against Plane's public source, `IssueAttachmentDetailAPIEndpoint.get`); it does not return the attachment's metadata. `getDownloadUrl()` follows this manually (`redirect: "manual"`) and returns the `Location` header. Metadata comes from `list()` instead.
+- **`attachments.list()` returns a plain array, not `{ results: [...] }`** — unlike every paginated resource in this client, the API returns `IssueAttachmentSerializer(many=True).data` directly (confirmed in source). The client handles both shapes defensively but there is no pagination here.
+- **Attachments work on intake work items too** — intake issues are regular `Issue` rows under the hood; resolve the intake record to its `issue` UUID (`intake.resolveIssueId` / `intake list`) and use the same `workItems.attachments.*` methods. There is no separate intake-attachments endpoint.
+
+## Error Handling Pattern
+
+```typescript
+import { PlaneApiError } from '@gzl10/plane-client'
+
+try {
+  await client.workItems.create('proj', { name: '' })
+} catch (err) {
+  if (err instanceof PlaneApiError) {
+    if (err.isAuth) { /* invalid/expired API key */ }
+    if (err.isPermission) { /* API key lacks permission */ }
+    if (err.isNotFound) { /* should not happen — get() returns null */ }
+    if (err.isRateLimit) { /* throttle requests */ }
+    if (err.isTimeout) { /* increase timeout or retry */ }
+  }
+}
+```
+
+## Common Errors
+
+```
+baseUrl not configured         → planec config set baseUrl https://...
+apiKey not configured          → planec login --token YOUR_KEY
+workspace not configured       → planec workspace use YOUR_SLUG
+No project specified           → planec use UUID  or  -p UUID  or  PLANE_PROJECT=UUID
+Invalid project UUID           → UUID must match xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
