@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.claude/
+
+# Scratch de sesiones de agente (barridos, volcados). El mirror de GitHub es
+# PÚBLICO y excluye por lista fija, así que un temporal sin ignorar acaba ahí:
+# estos ficheros llegaron a contener títulos de work items de clientes.
+*.tmp.*
+*.tmp.mjs
