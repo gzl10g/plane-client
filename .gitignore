@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+# `.claude/` guarda tanto skills del proyecto (que SÍ se versionan: son parte de
+# cómo se opera este repo) como estado local del agente (settings.local.json,
+# permisos, historial), que no. De ahí el patrón ignorar-todo-menos-skills: con
+# `.claude/` a secas git ni siquiera desciende al directorio, así que un
+# `!.claude/skills/` no rescataría nada.
+.claude/*
+!.claude/skills/
+
+# Scratch de sesiones de agente (barridos, volcados). El mirror de GitHub es
+# PÚBLICO y excluye por lista fija, así que un temporal sin ignorar acaba ahí:
+# estos ficheros llegaron a contener títulos de work items de clientes.
+*.tmp.*
+*.tmp.mjs
+
+# Fichero de comandos para probar a mano; local, no se publica
+comandos.txt
